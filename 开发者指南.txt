@@ -1,0 +1,289 @@
+# AI 流程图 — 开发者指南
+
+## 这个项目是什么
+
+一个在线流程图编辑器，核心能力是：把代码丢进去，AI 自动生成流程图，你可以在画布上编辑，最后导出图片。
+
+它不是通用绘图工具（不是 draw.io），而是专注做"代码 → 流程图"这一件事。
+
+---
+
+## 核心链路（30 秒理解全貌）
+
+代码 ──AI──→ PUML ──解析──→ Graph JSON ──渲染──→ ReactFlow 画布
+                                                      │
+                                                      ├── 用户编辑 → Graph JSON → PUML（反向生成）
+                                                      ├── 保存 → PostgreSQL
+                                                      └── 导出 → PNG / SVG / PDF
+
+整条链路由 4 个核心转换 串联：
+
+转换         输入         输出           执行位置   实现文件
+──────────   ──────────   ──────────     ────────   ──────────────────────────────
+AI 转换      源代码       PUML 文本      后端       services/ai_proxy.py
+PUML 解析    PUML 文本    Graph JSON     后端       services/puml_parser.py
+画布渲染     Graph JSON   可视化节点     前端       components/FlowCanvas/
+反向生成     Graph JSON   PUML 文本      前端       lib/graphToPuml.ts
+
+---
+
+## 唯一的数据契约：FlowGraph
+
+前后端所有交互都围绕同一个数据结构：
+
+    type FlowGraph = {
+      nodes: Node[]   // 节点列表
+      edges: Edge[]   // 连线列表
+    }
+
+    type Node = {
+      id: string
+      type: "start" | "end" | "process" | "decision" | "loop" | "function_call" | "io"
+      label: string
+      position: { x: number; y: number }
+    }
+
+    type Edge = {
+      id: string
+      source: string     // 起始节点 id
+      target: string     // 目标节点 id
+      label?: string
+      type?: "yes" | "no" | "default"   // decision 分支标记
+    }
+
+记住这个结构就够了。后端存的是它，前端画的是它，AI 输出解析后也是它。
+
+---
+
+## 7 种节点类型速查
+
+type            含义         典型来源                      画布形状
+─────────────   ──────────   ──────────────────────────    ──────────────────────────────
+start           流程开始     start / def main()            跑道形（两端圆弧的矩形）
+end             流程结束     stop / return                 跑道形（两端圆弧的矩形）
+process         普通操作     :doSomething();               矩形
+decision        条件分支     if (cond) then (yes)          菱形
+loop            循环         while (...) / for (...)       矩形
+function_call   函数调用     :callFunc();                  矩形
+io              输入输出     :read input;                  矩形
+
+### 流程图样式规范
+
+- 配色：黑白配色，白底黑线，简洁清晰
+- 开始/结束：两端为圆弧的矩形（跑道形/圆角长椭圆形）
+- 处理：矩形
+- 判断：菱形
+- 输入/输出：矩形
+- 连接线：黑色箭头（ArrowClosed），直线连接，转角处必须是直角（step edge）
+- 边框：2px 黑色实线
+- 文字：黑色，居中
+
+样式实现文件：frontend/src/components/FlowCanvas/nodes.tsx
+
+---
+
+## 技术栈一览
+
+前端                                    后端
+─────────────────────────               ─────────────────────────
+Vite          构建工具                   FastAPI       Web 框架
+React 19      UI 框架                   Python 3.12   语言
+TypeScript    类型安全                   SQLAlchemy    ORM (async)
+TailwindCSS   样式                      PostgreSQL    数据库
+Zustand       状态管理                   Redis         缓存 + 限流
+TanStack Router  路由                   Alembic       数据库迁移
+TanStack Query   数据请求               httpx         HTTP 客户端
+ReactFlow     流程图画布                PyJWT         认证
+Monaco Editor 代码编辑器
+
+---
+
+## 项目结构速览
+
+项目根目录/
+├── frontend/                    # 前端项目
+│   └── src/
+│       ├── app/routes/          # 页面路由（TanStack Router）
+│       ├── components/          # UI 组件
+│       │   ├── FlowCanvas/      # ★ 核心：ReactFlow 画布
+│       │   ├── Toolbar/         # 工具栏
+│       │   ├── NodePanel/       # 节点属性面板
+│       │   └── AIInputBox/      # AI 代码输入框
+│       ├── stores/              # Zustand 状态
+│       └── lib/
+│           ├── api.ts           # 后端 API 封装
+│           └── graphToPuml.ts   # ★ 核心：Graph → PUML
+│
+├── backend/                     # 后端项目
+│   └── app/
+│       ├── api/                 # 路由层
+│       │   ├── ai.py            # POST /api/ai/convert
+│       │   ├── parse.py         # POST /api/parse/puml
+│       │   ├── flow.py          # CRUD /api/flow/*
+│       │   └── auth.py          # 登录/注册
+│       ├── services/            # 业务逻辑层
+│       │   ├── ai_proxy.py      # ★ 核心：AI 代理
+│       │   ├── ai_adapters/     # ★ 核心：多供应商适配
+│       │   ├── puml_parser.py   # ★ 核心：PUML 解析器
+│       │   └── cache.py         # Redis 缓存
+│       ├── models/              # 数据库模型
+│       ├── schemas/             # Pydantic 校验
+│       ├── core/                # JWT / Redis
+│       └── db/                  # 数据库连接 + 迁移
+│
+├── docker-compose.yml           # PostgreSQL + Redis
+└── .env.example                 # 环境变量模板
+
+标 ★ 的是核心文件，理解它们就理解了系统。
+
+---
+
+## API 速查
+
+所有接口基础路径：/api，认证方式：Authorization: Bearer <jwt>
+
+接口                  方法     说明                      认证
+───────────────────   ──────   ────────────────────────  ──────
+/api/ai/convert       POST     代码 → PUML（SSE 流式）  需要
+/api/parse/puml       POST     PUML → Graph JSON        需要
+/api/flow             POST     保存流程图                需要
+/api/flow             GET      列表（分页）              需要
+/api/flow/{id}        GET      加载流程图                需要
+/api/flow/{id}        PUT      更新流程图                需要
+/api/flow/{id}        DELETE   删除流程图                需要
+/api/auth/register    POST     注册                      不需要
+/api/auth/login       POST     登录                      不需要
+
+---
+
+## 快速启动
+
+### 1. 环境准备
+
+    # 启动 PostgreSQL + Redis
+    docker-compose up -d
+
+    # 复制环境变量
+    cp .env.example .env
+
+### 2. 后端
+
+    cd backend
+
+    # 安装依赖
+    pip install -r requirements.txt
+
+    # 数据库迁移
+    alembic upgrade head
+
+    # 启动
+    uvicorn app.main:app --reload --port 8000
+
+### 3. 前端
+
+    cd frontend
+
+    # 安装依赖
+    npm install
+
+    # 启动
+    npm run dev
+
+前端默认 http://localhost:5173，后端默认 http://localhost:8000。
+
+---
+
+## 关键设计决策
+
+### 为什么 PUML 解析只在后端做？
+
+解析器需要处理复杂语法，Python 生态更适合做文本解析（正则、状态机）。如果前后端各实现一套，两边行为不一致会导致画布和后端数据不同步。
+
+### 为什么反向生成只在前端做？
+
+编辑器需要实时响应用户操作（拖拽、连线），每次改动都请求后端会卡顿。Graph JSON → PUML 是纯字符串拼接，前端完全能胜任。
+
+### 为什么 SSE 用 POST 而不是 GET？
+
+浏览器 EventSource API 不支持自定义 Header，无法传 JWT。改用 fetch + ReadableStream 消费 SSE，POST 请求可以正常带 Authorization Header。
+
+### 为什么需要 AI 适配层？
+
+OpenAI/DeepSeek 和 Claude 的 API 协议不同（端点、认证 Header、流式终止信号）。适配层屏蔽差异，ai_proxy.py 只需要调 adapter.chat_stream()，不关心具体供应商。
+
+### Redis 存什么？
+
+两个用途：
+- 解析缓存：parse:{sha256(puml)} → Graph JSON，TTL 1 小时，相同 PUML 不重复解析
+- 频率限制：ratelimit:{user_id} → INCR + EXPIRE，防止 AI 接口被滥用
+
+---
+
+## 常见开发场景
+
+### 场景 1：新增一种节点类型
+
+1. 前端：在 NodeType 类型中添加新值
+2. 前端：在 FlowCanvas 中添加该类型的渲染组件
+3. 后端：在 puml_parser.py 中添加识别该节点的规则
+4. 前端：在 graphToPuml.ts 中添加该节点的 PUML 生成逻辑
+
+### 场景 2：接入新的 AI 供应商
+
+1. 后端：在 services/ai_adapters/ 下新建适配器文件
+2. 后端：继承 base.py 的 AIAdapter，实现 chat_stream 方法
+3. 后端：在 ai_proxy.py 中注册新的 provider 名称
+4. 前端：在 AI 输入框的 provider 下拉选项中添加新选项
+
+### 场景 3：修改数据库表结构
+
+1. 后端：修改 models/ 下的 SQLAlchemy 模型
+2. 后端：运行 alembic revision --autogenerate -m "描述" 生成迁移文件
+3. 后端：运行 alembic upgrade head 应用迁移
+4. 后端：同步更新 schemas/ 下的 Pydantic 模型
+
+---
+
+## 错误处理约定
+
+所有错误响应统一格式：
+
+    {
+      "error": "ERROR_CODE",
+      "message": "人类可读描述",
+      "detail": {}
+    }
+
+前端 api.ts 中应封装统一的错误处理：
+
+    // 示例：统一错误处理
+    async function request<T>(url: string, options: RequestInit): Promise<T> {
+      const res = await fetch(url, options)
+      if (!res.ok) {
+        const err = await res.json()
+        throw new ApiError(err.error, err.message, err.detail)
+      }
+      return res.json()
+    }
+
+---
+
+## 文件速查表
+
+想改什么功能，直接找对应文件：
+
+我想改...                    去找...
+──────────────────────────   ──────────────────────────────────────
+AI 转换的 Prompt              backend/app/services/ai_proxy.py
+AI 供应商适配                 backend/app/services/ai_adapters/
+PUML 解析规则                 backend/app/services/puml_parser.py
+画布节点样式                  frontend/src/components/FlowCanvas/
+节点属性面板                  frontend/src/components/NodePanel/
+Graph → PUML 逻辑            frontend/src/lib/graphToPuml.ts
+API 请求封装                  frontend/src/lib/api.ts
+全局状态管理                  frontend/src/stores/
+数据库表结构                  backend/app/models/
+数据库迁移                    backend/app/db/migrations/
+JWT 认证逻辑                  backend/app/core/security.py
+Redis 缓存策略                backend/app/services/cache.py
+环境变量配置                  .env.example + backend/app/config.py

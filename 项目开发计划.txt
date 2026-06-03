@@ -1,0 +1,552 @@
+# AI 流程图项目 — 开发计划
+
+## 一、产品定位
+
+AI 驱动的代码 → PUML → 流程图在线编辑工具。
+
+核心功能：
+- 支持 C / C++ / Python 代码输入
+- AI 自动将代码转换为 PlantUML 流程图
+- 可视化流程图编辑（ReactFlow）
+- 编辑后可反向生成 PUML 代码
+- 导出 PNG / PDF / SVG
+- 保存/加载历史项目
+
+---
+
+## 二、系统架构
+
+```
+┌─────────────────────────────────┐
+│           Frontend              │
+│  Vite + React 19 + TypeScript   │
+│  ReactFlow + Monaco Editor      │
+└────────────┬────────────────────┘
+             │ REST / SSE
+┌────────────▼────────────────────┐
+│           Backend               │
+│     FastAPI (Python 3.12)       │
+└──────┬──────────┬───────────────┘
+       │          │
+┌──────▼──────┐ ┌─▼───────────────┐
+│  AI Proxy   │ │ PUML Parser     │
+│  (httpx)    │ │ (Python 实现)   │
+└──────┬──────┘ └─┬───────────────┘
+       │          │
+       └────┬─────┘
+            ▼
+   ┌────────────────┐
+   │  PostgreSQL     │
+   │  + Redis Cache  │
+   └────────────────┘
+```
+
+数据流：
+1. 用户输入代码 → AI 转换为 PUML → 后端内部调用 puml_parser 解析为 Graph JSON → 一次性返回 puml + graph → ReactFlow 渲染
+2. 用户手写/粘贴 PUML → 调用 POST /api/parse/puml → 返回 Graph JSON → ReactFlow 渲染
+3. 用户编辑流程图 → Graph JSON → 前端 graphToPuml.ts 本地生成 PUML 代码（实时，无需请求后端）
+4. 用户可随时保存/加载/导出
+
+职责划分：
+- PUML → Graph JSON（解析）：仅后端，前端不实现解析器
+- Graph JSON → PUML（反向生成）：仅前端，编辑器内实时生成，无需后端参与
+- AI 代码 → PUML：后端 AI Proxy 返回时，内部自动调用解析器，同时返回 puml 和 graph
+
+---
+
+## 三、技术栈（已锁定）
+
+### 前端
+
+| 用途 | 技术 |
+|------|------|
+| 构建工具 | Vite |
+| 框架 | React 19 |
+| 语言 | TypeScript |
+| 样式 | TailwindCSS |
+| 状态管理 | Zustand |
+| 路由 | TanStack Router |
+| 数据请求 | TanStack Query |
+| 流程图画布 | ReactFlow |
+| 代码编辑器 | Monaco Editor |
+
+### 后端
+
+| 用途 | 技术 |
+|------|------|
+| Web 框架 | FastAPI |
+| 语言 | Python 3.12 |
+| 数据库 | PostgreSQL |
+| ORM | SQLAlchemy 2.0 (async) |
+| 数据库迁移 | Alembic |
+| 缓存 | Redis（解析结果缓存 + AI 调用频率限制） |
+| HTTP 客户端 | httpx（AI 代理请求，含供应商适配层） |
+| 认证 | JWT (PyJWT) |
+
+---
+
+## 四、目录结构
+
+### 前端
+
+```
+frontend/
+├── src/
+│   ├── app/
+│   │   ├── routes/
+│   │   │   ├── index.tsx         # 根路径，重定向到 /dashboard
+│   │   │   ├── editor.tsx        # 编辑器页面
+│   │   │   ├── dashboard.tsx     # 项目列表
+│   │   │   ├── login.tsx         # 登录
+│   │   │   ├── settings.tsx      # 设置
+│   │   │   └── $.tsx             # 404 页面（通配路由）
+│   │   └── routeTree.gen.ts
+│   ├── components/
+│   │   ├── FlowCanvas/           # ReactFlow 画布
+│   │   ├── Toolbar/              # 工具栏
+│   │   ├── NodePanel/            # 节点属性面板
+│   │   └── AIInputBox/           # AI 代码输入框
+│   ├── stores/                   # Zustand stores
+│   ├── lib/
+│   │   ├── api.ts                # API 请求封装（含 SSE 消费）
+│   │   └── graphToPuml.ts        # Graph JSON → PUML（前端本地生成）
+│   └── main.tsx
+├── index.html
+├── vite.config.ts
+├── tailwind.config.ts
+├── tsconfig.json
+└── package.json
+```
+
+### 后端
+
+```
+backend/
+├── app/
+│   ├── main.py                   # FastAPI 入口
+│   ├── config.py                 # 配置（环境变量）
+│   ├── deps.py                   # 依赖注入
+│   ├── models/                   # SQLAlchemy 模型
+│   │   ├── base.py
+│   │   ├── user.py
+│   │   └── flow.py
+│   ├── schemas/                  # Pydantic 请求/响应模型
+│   │   ├── ai.py
+│   │   ├── flow.py
+│   │   └── user.py
+│   ├── api/                      # 路由
+│   │   ├── ai.py                 # POST /api/ai/convert
+│   │   ├── flow.py               # CRUD /api/flow/*
+│   │   ├── auth.py               # 登录/注册
+│   │   └── parse.py              # POST /api/parse/puml
+│   ├── services/                 # 业务逻辑
+│   │   ├── ai_proxy.py           # AI 代理（httpx，调用适配器）
+│   │   ├── ai_adapters/          # 多供应商适配层
+│   │   │   ├── base.py           # 抽象接口 AIAdapter
+│   │   │   ├── openai.py         # OpenAI / DeepSeek（兼容协议）
+│   │   │   └── claude.py         # Claude（不同协议）
+│   │   ├── puml_parser.py        # PUML → Graph JSON（后端唯一解析入口）
+│   │   └── cache.py              # Redis 缓存（解析结果 + 频率限制）
+│   ├── core/
+│   │   ├── security.py           # JWT 认证
+│   │   └── redis.py              # Redis 客户端
+│   └── db/
+│       ├── session.py            # SQLAlchemy async session
+│       └── migrations/           # Alembic 迁移
+├── alembic.ini
+├── pyproject.toml
+└── requirements.txt
+```
+
+---
+
+## 五、核心数据模型
+
+### Graph JSON（前端 + 后端共享）
+
+```typescript
+type NodeType =
+  | "start"
+  | "end"
+  | "process"
+  | "decision"
+  | "loop"
+  | "function_call"
+  | "io"
+
+type Node = {
+  id: string
+  type: NodeType
+  label: string
+  position: { x: number; y: number }
+  data?: Record<string, unknown>
+}
+
+type Edge = {
+  id: string
+  source: string
+  target: string
+  label?: string
+  type?: "yes" | "no" | "default"
+}
+
+type FlowGraph = {
+  nodes: Node[]
+  edges: Edge[]
+  metadata?: {
+    title?: string
+    sourceLanguage?: "python" | "c" | "cpp"
+    createdAt?: string
+  }
+}
+```
+
+### 数据库表（PostgreSQL）
+
+```python
+# users 表
+class User:
+    id: UUID (PK)
+    email: VARCHAR (UNIQUE, INDEX)
+    hashed_password: VARCHAR
+    created_at: TIMESTAMP
+
+# flow_projects 表
+class FlowProject:
+    id: UUID (PK)
+    user_id: UUID (FK → users.id)
+    title: VARCHAR
+    graph_json: JSONB          # ReactFlow 数据
+    puml_source: TEXT           # PUML 源码
+    source_code: TEXT           # 用户原始代码
+    source_language: VARCHAR    # "python" | "c" | "cpp"
+    created_at: TIMESTAMP
+    updated_at: TIMESTAMP
+```
+
+---
+
+## 六、API 契约
+
+### 1. AI 代码转换（SSE 流式）
+
+注意：使用 POST + fetch ReadableStream 消费 SSE 流式响应，
+Authorization Header 正常传递，token 不暴露在 URL 中。
+
+```
+POST /api/ai/convert
+Authorization: Bearer <jwt>
+{
+  "code": "def hello():\n    print('hi')",
+  "language": "python",
+  "provider": "deepseek",
+  "apiKey": "sk-..."
+}
+
+实现流程：
+1. 后端根据 provider 选择对应 AIAdapter（openai / claude）
+2. AIAdapter 通过 httpx 流式调用 AI API，逐块转发给前端（SSE）
+3. 前端通过 fetch + ReadableStream 消费 SSE，支持自定义 Authorization Header
+4. AI 返回完毕后，后端内部调用 puml_parser 解析完整 PUML
+5. 最终 SSE 事件同时返回 puml 和 graph
+
+Response (SSE 流式):
+data: {"type": "chunk", "content": "@startuml\nstart\n"}
+data: {"type": "chunk", "content": ":hello();\n"}
+data: {"type": "done", "puml": "@startuml\nstart\n:hello();\nstop\n@enduml", "graph": {"nodes": [...], "edges": [...]}}
+
+Response (非流式回退) 200:
+{
+  "puml": "@startuml\nstart\n:hello();\nstop\n@enduml",
+  "graph": {
+    "nodes": [...],
+    "edges": [...]
+  }
+}
+
+Response 422: AI 输出非法 PUML（重试 3 次后仍失败）
+{
+  "error": "PUML_GENERATION_FAILED",
+  "message": "AI 输出无法解析为合法 PUML",
+  "detail": { "raw_puml": "...", "parse_errors": [...] }
+}
+
+Response 502: AI 服务不可用
+{
+  "error": "AI_SERVICE_UNAVAILABLE",
+  "message": "无法连接到 deepseek API",
+  "detail": { "status_code": 503 }
+}
+```
+
+### 2. PUML 解析
+
+```
+POST /api/parse/puml
+Authorization: Bearer <jwt>
+
+Request:
+{
+  "puml": "@startuml\nstart\n:读取输入;\nstop\n@enduml"
+}
+
+Response 200:
+{
+  "graph": {
+    "nodes": [
+      { "id": "n1", "type": "start", "label": "开始", "position": { "x": 0, "y": 0 } },
+      { "id": "n2", "type": "io", "label": "读取输入", "position": { "x": 0, "y": 100 } },
+      { "id": "n3", "type": "end", "label": "结束", "position": { "x": 0, "y": 200 } }
+    ],
+    "edges": [
+      { "id": "e1", "source": "n1", "target": "n2" },
+      { "id": "e2", "source": "n2", "target": "n3" }
+    ]
+  }
+}
+
+Response 422:
+{
+  "error": "PUML_SYNTAX_ERROR",
+  "message": "缺少 @enduml 闭合标签",
+  "detail": { "line": 5 }
+}
+```
+
+### 3. 流程图 CRUD
+
+```
+POST   /api/flow               # 创建
+GET    /api/flow                # 列表（分页 ?page=1&size=20）
+GET    /api/flow/{id}           # 详情
+PUT    /api/flow/{id}           # 更新
+DELETE /api/flow/{id}           # 删除
+
+所有接口均需 Authorization: Bearer <jwt>
+权限校验：GET/PUT/DELETE /api/flow/{id} 必须校验 flow.user_id == current_user.id，否则返回 403
+
+POST /api/flow Request:
+{
+  "title": "我的流程图",
+  "graph_json": { "nodes": [...], "edges": [...] },
+  "puml_source": "@startuml\n...",
+  "source_code": "def hello():...",
+  "source_language": "python"
+}
+
+GET /api/flow Response 200:
+{
+  "items": [
+    {
+      "id": "uuid",
+      "title": "我的流程图",
+      "source_language": "python",
+      "created_at": "2026-05-20T10:00:00Z",
+      "updated_at": "2026-05-20T12:00:00Z"
+    }
+  ],
+  "total": 42,
+  "page": 1,
+  "size": 20
+}
+```
+
+### 4. 认证
+
+```
+POST /api/auth/register
+Request: { "email": "...", "password": "..." }
+Response 201: { "id": "uuid", "email": "..." }
+Response 409: { "error": "EMAIL_EXISTS", "message": "该邮箱已注册", "detail": {} }
+
+POST /api/auth/login
+Request: { "email": "...", "password": "..." }
+Response 200: { "access_token": "jwt...", "token_type": "bearer" }
+Response 401: { "error": "INVALID_CREDENTIALS", "message": "邮箱或密码错误", "detail": {} }
+```
+
+### 统一错误响应格式
+
+所有接口的错误响应遵循以下格式：
+
+```json
+{
+  "error": "ERROR_CODE",
+  "message": "人类可读的描述",
+  "detail": {}
+}
+```
+
+常用错误码：
+| HTTP 状态码 | error code | 含义 |
+|-------------|-----------|------|
+| 400 | BAD_REQUEST | 请求参数错误 |
+| 401 | UNAUTHORIZED | 未认证或 token 过期 |
+| 403 | FORBIDDEN | 无权限操作该资源 |
+| 404 | NOT_FOUND | 资源不存在 |
+| 409 | EMAIL_EXISTS | 邮箱已注册 |
+| 422 | PUML_SYNTAX_ERROR | PUML 语法错误 |
+| 422 | PUML_GENERATION_FAILED | AI 输出无法解析 |
+| 429 | RATE_LIMITED | AI 调用频率超限 |
+| 502 | AI_SERVICE_UNAVAILABLE | AI 供应商不可用 |
+| 500 | INTERNAL_ERROR | 服务器内部错误 |
+
+---
+
+## 七、AI Prompt 设计
+
+### 系统 Prompt
+
+```
+你是一个代码分析器，负责将源代码转换为 PlantUML 流程图。
+
+规则：
+1. 严格使用 PlantUML activity diagram 语法
+2. 必须以 @startuml 开头，@enduml 结尾
+3. 每个函数/方法独立为一个流程段
+4. if/else 必须用 endif 完整闭合
+5. 循环使用 while/endwhile 或 for/endfor
+6. 函数调用使用 :call_function(); 格式
+7. 输入输出使用 :read_input(); 或 :print_output(); 格式
+8. 不要添加注释或解释，只输出 PUML 代码
+```
+
+### 用户 Prompt
+
+```
+将以下 {language} 代码转换为 PlantUML 流程图：
+
+{code}
+```
+
+---
+
+## 八、MVP 开发阶段
+
+### P0 — 项目初始化
+
+- [ ] 项目根目录：.env.example（数据库连接串、JWT Secret、Redis 地址、CORS 配置）
+- [ ] docker-compose.yml（PostgreSQL + Redis 本地开发环境）
+- [ ] FastAPI 项目骨架（main.py, config, CORS）
+- [ ] PostgreSQL 连接 + SQLAlchemy async session
+- [ ] Alembic 初始化 + users/flow_projects 表迁移
+- [ ] Vite + React 19 + TypeScript 项目骨架
+- [ ] 前端环境变量：VITE_API_BASE_URL（后端地址）
+- [ ] TailwindCSS + 基础布局
+
+### P1 — PUML 解析器
+
+- [ ] 后端：PUML → Graph JSON 解析服务（puml_parser.py）
+- [ ] 后端：POST /api/parse/puml 接口
+- [ ] 前端：API 请求封装（TanStack Query）
+- [ ] 验证：手写 PUML → 解析 → 返回 Graph JSON
+
+### P2 — ReactFlow 画布
+
+- [ ] 前端：ReactFlow 画布组件
+- [ ] 前端：根据 NodeType 渲染不同节点样式
+- [ ] 前端：节点拖拽、连线、删除
+- [ ] 验证：Graph JSON → 画布正常显示
+
+### P3 — AI 转换
+
+- [ ] 后端：AIAdapter 抽象接口 + OpenAI/DeepSeek 适配器 + Claude 适配器
+- [ ] 后端：AI Proxy 服务（httpx 流式调用，内部调用 puml_parser 解析）
+- [ ] 后端：SSE 流式输出（POST，Authorization Header 正常传递）
+- [ ] 后端：Redis 频率限制（同一用户每分钟最多 N 次 AI 调用）
+- [ ] 后端：POST /api/ai/convert 接口
+- [ ] 前端：AI 输入框组件 + fetch ReadableStream 消费 SSE
+- [ ] 前端：AI 返回 → 画布渲染，端到端打通
+
+### P4 — 反向生成 PUML
+
+- [ ] 前端：graphToPuml.ts 实现 Graph JSON → PUML 转换（纯前端，无需后端）
+- [ ] 前端：编辑器内嵌 Monaco Editor 显示 PUML 源码
+- [ ] 前端：画布编辑 → 实时同步更新 PUML 代码
+- [ ] 验证：编辑画布 → 导出 PUML → 调用后端 /api/parse/puml 重新解析 → 画布一致
+
+### P5 — 用户认证
+
+- [ ] 后端：注册/登录接口（bcrypt + JWT）
+- [ ] 后端：认证中间件
+- [ ] 前端：登录/注册页面
+- [ ] 前端：Token 管理（Zustand + localStorage）
+
+### P6 — 保存/加载
+
+- [ ] 后端：流程图 CRUD 接口
+- [ ] 前端：保存按钮 → POST /api/flow
+- [ ] 前端：项目列表页面 → GET /api/flow
+- [ ] 前端：加载项目 → GET /api/flow/{id}
+
+### P7 — 导出
+
+- [ ] 前端：导出 PNG（html-to-image / dom-to-image）
+- [ ] 前端：导出 SVG（ReactFlow 内置）
+- [ ] 前端：导出 PDF（jsPDF + canvas）
+
+---
+
+## 九、已知风险与应对
+
+### 1. AI 输出不稳定
+
+AI 生成的 PUML 可能语法错误。
+
+应对：
+- 后端对 AI 输出做语法校验，失败自动重试（最多 3 次）
+- 前端解析失败时展示原始 PUML，允许用户手动修正
+- Prompt 中严格约束输出格式
+
+### 2. PUML 解析复杂
+
+PlantUML 语法灵活，完整解析难度高。
+
+应对：
+- MVP 阶段只支持 activity diagram 基础语法
+- 使用正则 + 状态机实现轻量解析器，不引入重型依赖
+- 逐步扩展支持的语法范围
+
+### 3. 画布性能
+
+大量节点时 ReactFlow 可能卡顿。
+
+应对：
+- 使用 ReactFlow 的 virtualization 模式
+- 超过 200 节点时自动折叠子流程
+- 节点渲染使用 memo 包裹，避免不必要重绘
+
+### 4. API Key 安全
+
+用户自带 API Key，后端代理请求。
+
+应对：
+- Key 仅在请求期间存在于内存，不落库
+- 强制 HTTPS 传输
+- 后端不记录任何 AI 请求的 Key 内容
+
+### 5. Redis 缓存策略
+
+用途一：PUML 解析结果缓存
+- key: `parse:{sha256(puml_text)}`，value: Graph JSON，TTL: 1 小时
+- 相同 PUML 文本不重复解析，减轻 CPU 开销
+
+用途二：AI 调用频率限制
+- key: `ratelimit:{user_id}`，使用 Redis INCR + EXPIRE
+- 限制：普通用户 10 次/分钟，避免滥用
+
+### 6. 多 AI 供应商适配
+
+不同供应商 API 协议差异大，需要适配层隔离：
+
+| 供应商 | 端点 | 认证方式 | 流式格式 |
+|--------|------|----------|----------|
+| OpenAI | /v1/chat/completions | Authorization: Bearer | SSE, data: [DONE] |
+| DeepSeek | /v1/chat/completions | Authorization: Bearer | SSE, data: [DONE]（兼容 OpenAI） |
+| Claude | /v1/messages | x-api-key + anthropic-version | SSE, event: message_stop |
+
+设计：
+- 定义 AIAdapter 抽象接口（chat_stream 方法）
+- OpenAIAdapter 处理 OpenAI + DeepSeek（协议相同）
+- ClaudeAdapter 处理 Claude（协议不同）
+- ai_proxy.py 根据 provider 字段选择适配器
